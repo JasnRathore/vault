@@ -189,6 +189,7 @@ func normalizeURLPath(urlPath string) string {
 	}
 	return normalized
 }
+
 func safePath(urlPath string) (string, error) {
 	basePath, err := filepath.Abs(directoryPath)
 	if err != nil {
@@ -202,13 +203,9 @@ func safePath(urlPath string) (string, error) {
 		return "", err
 	}
 
-	// Strip any trailing separator
-	targetPath = strings.TrimRight(targetPath, string(filepath.Separator))
-	basePath = strings.TrimRight(basePath, string(filepath.Separator))
-
-	// Normalize volume label case for Windows comparison only
-	basePathLower := strings.ToLower(basePath)
-	targetPathLower := strings.ToLower(targetPath)
+	// Normalize volume label case for Windows (e.g. "D:\" vs "d:\")
+	basePathLower := strings.ToLower(filepath.Clean(basePath))
+	targetPathLower := strings.ToLower(filepath.Clean(targetPath))
 
 	relToBase, err := filepath.Rel(basePathLower, targetPathLower)
 	if err != nil {
