@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -174,12 +175,49 @@ func isPreviewable(name string) bool {
 		mime == "application/pdf"
 }
 
+func normalizeURLPath(urlPath string) string {
+	normalized := strings.ReplaceAll(urlPath, "\\", "/")
+	if normalized == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	normalized = pathpkg.Clean(normalized)
+	if normalized == "." {
+		return "/"
+	}
+	return normalized
+}
 func safePath(urlPath string) (string, error) {
-	cleanPath := filepath.Clean(filepath.Join(directoryPath, urlPath))
-	if !strings.HasPrefix(filepath.Clean(cleanPath), filepath.Clean(directoryPath)) {
+	basePath, err := filepath.Abs(directoryPath)
+	if err != nil {
+		return "", err
+	}
+
+	normalizedURLPath := normalizeURLPath(urlPath)
+	relativePath := strings.TrimPrefix(normalizedURLPath, "/")
+	targetPath, err := filepath.Abs(filepath.Join(basePath, filepath.FromSlash(relativePath)))
+	if err != nil {
+		return "", err
+	}
+
+	// Strip any trailing separator
+	targetPath = strings.TrimRight(targetPath, string(filepath.Separator))
+	basePath = strings.TrimRight(basePath, string(filepath.Separator))
+
+	// Normalize volume label case for Windows comparison only
+	basePathLower := strings.ToLower(basePath)
+	targetPathLower := strings.ToLower(targetPath)
+
+	relToBase, err := filepath.Rel(basePathLower, targetPathLower)
+	if err != nil {
+		return "", err
+	}
+	if relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("access denied")
 	}
-	return cleanPath, nil
+	return targetPath, nil
 }
 
 func dirSize(path string) int64 {
@@ -194,7 +232,8 @@ func dirSize(path string) int64 {
 }
 
 func listDirectory(urlPath string) ([]FileEntry, error) {
-	cleanPath, err := safePath(urlPath)
+	normalizedURLPath := normalizeURLPath(urlPath)
+	cleanPath, err := safePath(normalizedURLPath)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +249,7 @@ func listDirectory(urlPath string) ([]FileEntry, error) {
 		if err != nil {
 			continue
 		}
-		entryPath := filepath.Join(urlPath, entry.Name())
+		entryPath := pathpkg.Join(normalizedURLPath, entry.Name())
 		if !strings.HasPrefix(entryPath, "/") {
 			entryPath = "/" + entryPath
 		}
@@ -237,6 +276,7 @@ func listDirectory(urlPath string) ([]FileEntry, error) {
 }
 
 func buildBreadcrumbs(urlPath string) []Crumb {
+	urlPath = normalizeURLPath(urlPath)
 	if urlPath == "/" || urlPath == "" {
 		return nil
 	}
@@ -252,10 +292,11 @@ func buildBreadcrumbs(urlPath string) []Crumb {
 }
 
 func parentPath(urlPath string) string {
+	urlPath = normalizeURLPath(urlPath)
 	if urlPath == "/" || urlPath == "" {
 		return ""
 	}
-	p := filepath.Dir(strings.TrimRight(urlPath, "/"))
+	p := pathpkg.Dir(strings.TrimRight(urlPath, "/"))
 	if p == "." {
 		return "/"
 	}
@@ -266,10 +307,7 @@ func parentPath(urlPath string) string {
 
 func browseHandler(tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		urlPath := strings.TrimPrefix(r.URL.Path, "/browse")
-		if urlPath == "" {
-			urlPath = "/"
-		}
+		urlPath := normalizeURLPath(strings.TrimPrefix(r.URL.Path, "/browse"))
 
 		entries, err := listDirectory(urlPath)
 		if err != nil {
@@ -423,15 +461,25 @@ func mkdirHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parentClean, err := safePath(req.Path)
-	if err != nil {
-		jsonError(w, "Access denied")
+	baseName := filepath.Base(req.DirName)
+	if baseName == "" || baseName == "." || baseName == ".." {
+		jsonError(w, "Invalid folder name")
 		return
 	}
 
-	newDir := filepath.Join(parentClean, filepath.Base(req.DirName))
+	parentClean, err := safePath(req.Path)
+	if err != nil {
+		jsonError(w, "Access denied: "+err.Error())
+		return
+	}
+
+	// Join the resolved parent path with the new folder name
+	newDir := filepath.Join(parentClean, baseName)
+    fmt.Printf("DEBUG mkdir: parentClean=%q baseName=%q newDir=%q\n", parentClean, baseName, newDir)
+
+	w.Header().Set("Content-Type", "application/json")
 	if err := os.MkdirAll(newDir, 0755); err != nil {
-		jsonError(w, err.Error())
+		jsonError(w, "MkdirAll failed: "+err.Error())
 		return
 	}
 	json.NewEncoder(w).Encode(APIResponse{Success: true, Message: "Folder created"})
@@ -561,10 +609,7 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func listAPIHandler(w http.ResponseWriter, r *http.Request) {
-	urlPath := r.URL.Query().Get("path")
-	if urlPath == "" {
-		urlPath = "/"
-	}
+	urlPath := normalizeURLPath(r.URL.Query().Get("path"))
 	entries, err := listDirectory(urlPath)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1621,7 +1666,7 @@ html,body{height:100%;background:var(--paper);color:var(--ink);font-family:var(-
 </div>
 
 <script>
-const CURRENT_PATH = {{printf "%q" .CurrentPath}};
+const CURRENT_PATH = {{.CurrentPath}};
 let entries = {{.EntriesJSON}};
 let ctxTarget=null, renameTarget=null, deleteTargets=[];
 let uploadFiles=[], sortField='name', sortDir='asc';
